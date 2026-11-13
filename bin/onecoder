@@ -247,11 +247,7 @@ cmd_login() {
     echo ""
   fi
   if [[ -z "${dokploy_url}" ]]; then
-    read -r -p "URL do Dokploy (ex: https://deploy.vitor.one): " dokploy_url
-  fi
-  if [[ -z "${dokploy_key}" ]]; then
-    read -r -s -p "API Key do Dokploy (x-api-key): " dokploy_key
-    echo ""
+    read -r -p "URL do Control Plane (ex: https://deploy.vitor.one): " dokploy_url
   fi
 
   ai_url="$(strip_trailing_slash "${ai_url}")"
@@ -266,8 +262,8 @@ cmd_login() {
   cat > "${CONFIG_FILE}" <<EOF
 ONECODER_AI_URL='${ai_url}'
 ONECODER_AI_KEY='${ai_key}'
+ONECODER_CONTROL_URL='${dokploy_url}'
 ONECODER_DOKPLOY_URL='${dokploy_url}'
-ONECODER_DOKPLOY_KEY='${dokploy_key}'
 ONECODER_DEFAULT_MODEL='${default_model}'
 ONECODER_ROLE='${role}'
 ONECODER_PREVIEW_DOMAIN='${preview_domain}'
@@ -433,13 +429,14 @@ cmd_projects() {
   require_cmd curl
   require_cmd python3
 
-  if [[ -z "${ONECODER_DOKPLOY_URL:-}" || -z "${ONECODER_DOKPLOY_KEY:-}" ]]; then
-    echo "Erro: Dokploy nao configurado. Rode 'onecoder login' informando --dokploy-url e --dokploy-key." >&2
+  local control_url="${ONECODER_CONTROL_URL:-${ONECODER_DOKPLOY_URL:-}}"
+  if [[ -z "${control_url}" || -z "${ONECODER_AI_KEY:-}" ]]; then
+    echo "Erro: Control Plane nao configurado. Rode 'onecoder login' informando --dokploy-url e --ai-key." >&2
     exit 1
   fi
 
   local response
-  response="$(curl -fsS -H "accept: application/json" -H "x-api-key: ${ONECODER_DOKPLOY_KEY}" "${ONECODER_DOKPLOY_URL}/api/project.all")"
+  response="$(curl -fsS -H "accept: application/json" -H "Authorization: Bearer ${ONECODER_AI_KEY}" "${control_url}/api/project.all")"
 
   python3 - "${response}" <<'PY'
 import json
@@ -570,13 +567,14 @@ PY
 
   local endpoint=""
   local body=""
+  local control_url="${ONECODER_CONTROL_URL:-${ONECODER_DOKPLOY_URL:-}}"
   case "${service_type}" in
     application)
-      endpoint="${ONECODER_DOKPLOY_URL}/api/application.deploy"
+      endpoint="${control_url}/api/application.deploy"
       body="$(python3 -c 'import json,sys; print(json.dumps({"applicationId": sys.argv[1]}))' "${service_id}")"
       ;;
     compose)
-      endpoint="${ONECODER_DOKPLOY_URL}/api/compose.deploy"
+      endpoint="${control_url}/api/compose.deploy"
       body="$(python3 -c 'import json,sys; print(json.dumps({"composeId": sys.argv[1]}))' "${service_id}")"
       ;;
     *)
@@ -589,7 +587,8 @@ PY
   curl -fsS -X POST "${endpoint}" \
     -H "accept: application/json" \
     -H "Content-Type: application/json" \
-    -H "x-api-key: ${ONECODER_DOKPLOY_KEY}" \
+    -H "Authorization: Bearer ${ONECODER_AI_KEY}" \
+    -H "X-Onecoder-Action: deploy_producao_main" \
     -d "${body}" >/dev/null
 
   echo "Deploy iniciado com sucesso na VPS do cliente via Dokploy!"
@@ -611,16 +610,17 @@ cmd_doctor() {
     exit 1
   fi
 
-  if [[ -n "${ONECODER_DOKPLOY_URL:-}" && -n "${ONECODER_DOKPLOY_KEY:-}" ]]; then
-    echo "==> Testando Dokploy (${ONECODER_DOKPLOY_URL})..."
-    if curl -fsS -H "accept: application/json" -H "x-api-key: ${ONECODER_DOKPLOY_KEY}" "${ONECODER_DOKPLOY_URL}/api/project.all" >/dev/null; then
-      echo "  [OK] API do Dokploy respondeu com sucesso (perfil: ${ONECODER_ROLE:-dev})."
+  local control_url="${ONECODER_CONTROL_URL:-${ONECODER_DOKPLOY_URL:-}}"
+  if [[ -n "${control_url}" && -n "${ONECODER_AI_KEY:-}" ]]; then
+    echo "==> Testando Control Plane (${control_url})..."
+    if curl -fsS -H "accept: application/json" -H "Authorization: Bearer ${ONECODER_AI_KEY}" "${control_url}/api/project.all" >/dev/null; then
+      echo "  [OK] Control Plane respondeu com sucesso (perfil: ${ONECODER_ROLE:-dev})."
     else
-      echo "  [FALHA] Nao foi possivel autenticar ou alcancar ${ONECODER_DOKPLOY_URL}/api/project.all." >&2
+      echo "  [FALHA] Nao foi possivel autenticar ou alcancar ${control_url}/api/project.all." >&2
       exit 1
     fi
   else
-    echo "==> Dokploy nao configurado (opcional se voce usa apenas a IA)."
+    echo "==> Control Plane nao configurado (opcional se voce usa apenas a IA)."
   fi
 }
 

@@ -34,7 +34,10 @@ SERVER_INSTRUCTIONS = (
 def env_config() -> Dict[str, str]:
     """Lê variaveis de configuracao ativas no ambiente."""
     return {
-        "dokploy_url": os.environ.get("ONECODER_DOKPLOY_URL", "").rstrip("/"),
+        "control_url": os.environ.get(
+            "ONECODER_CONTROL_URL", os.environ.get("ONECODER_DOKPLOY_URL", "")
+        ).rstrip("/"),
+        "ai_key": os.environ.get("ONECODER_AI_KEY", ""),
         "dokploy_key": os.environ.get("ONECODER_DOKPLOY_KEY", ""),
         "role": os.environ.get("ONECODER_ROLE", "dev").strip().lower() or "dev",
         "preview_domain": os.environ.get("ONECODER_PREVIEW_DOMAIN", "teste.vitor.one").strip(),
@@ -42,21 +45,31 @@ def env_config() -> Dict[str, str]:
     }
 
 
-def dokploy_request(method: str, path: str, payload: Optional[Dict[str, Any]] = None) -> Any:
-    """Executa uma requisicao HTTP contra a API REST do Dokploy."""
+def dokploy_request(
+    method: str,
+    path: str,
+    payload: Optional[Dict[str, Any]] = None,
+    action: str = "",
+) -> Any:
+    """Executa uma requisicao HTTP contra a Control API (ou Dokploy legado)."""
     cfg = env_config()
-    if not cfg["dokploy_url"] or not cfg["dokploy_key"]:
+    if not cfg["control_url"] or (not cfg["ai_key"] and not cfg["dokploy_key"]):
         raise RuntimeError(
-            "Dokploy nao configurado (ONECODER_DOKPLOY_URL / ONECODER_DOKPLOY_KEY). "
+            "Control Plane nao configurado (ONECODER_CONTROL_URL / ONECODER_AI_KEY). "
             "Execute 'onecoder login' com as credenciais da empresa."
         )
 
-    url = f"{cfg['dokploy_url']}{path}"
+    url = f"{cfg['control_url']}{path}"
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
     headers = {
         "accept": "application/json",
-        "x-api-key": cfg["dokploy_key"],
     }
+    if cfg["ai_key"]:
+        headers["Authorization"] = f"Bearer {cfg['ai_key']}"
+    else:
+        headers["x-api-key"] = cfg["dokploy_key"]
+    if action:
+        headers["X-Onecoder-Action"] = action
     if data is not None:
         headers["Content-Type"] = "application/json"
 
@@ -301,9 +314,19 @@ def tool_deploy_producao_main(args: Dict[str, Any]) -> Dict[str, Any]:
         raise ValueError("Parametros invalidos: 'serviceType' ('application'|'compose') e 'serviceId' sao obrigatorios.")
 
     if service_type == "application":
-        resp = dokploy_request("POST", "/api/application.deploy", {"applicationId": service_id})
+        resp = dokploy_request(
+            "POST",
+            "/api/application.deploy",
+            {"applicationId": service_id},
+            action="deploy_producao_main",
+        )
     else:
-        resp = dokploy_request("POST", "/api/compose.deploy", {"composeId": service_id})
+        resp = dokploy_request(
+            "POST",
+            "/api/compose.deploy",
+            {"composeId": service_id},
+            action="deploy_producao_main",
+        )
 
     append_audit_log(
         "deploy_producao_main",

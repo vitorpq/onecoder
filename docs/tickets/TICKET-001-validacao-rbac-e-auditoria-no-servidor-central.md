@@ -1,7 +1,7 @@
 # TICKET-001 — Validação RBAC e Auditoria no Servidor Central
 
 - **Prioridade:** Alta (Segurança)
-- **Status:** Aberto
+- **Status:** Concluido
 - **ADRs relacionados:** [ADR-0003](../adr/0003-agente-operacional-via-mcp-stdio-zero-dependencias.md), [ADR-0004](../adr/0004-governanca-de-deploy-preview-livre-producao-restrita.md)
 
 ## Contexto e Problema

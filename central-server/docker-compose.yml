@@ -33,5 +33,24 @@ services:
       - ./litellm_config.yaml:/app/config.yaml:ro
     command: ["--config", "/app/config.yaml", "--port", "4000"]
 
+  onecoder-control-api:
+    build:
+      context: ./onecoder-control-api
+    container_name: onecoder-control-api
+    restart: unless-stopped
+    depends_on:
+      - litellm
+    ports:
+      - "${CONTROL_API_PORT:-8080}:8080"
+    env_file:
+      - .env
+    environment:
+      CONTROL_API_PORT: "8080"
+      LITELLM_INTERNAL_URL: "http://litellm:4000"
+      AUDIT_LOG_PATH: "/data/audit.log"
+    volumes:
+      - control_api_data:/data
+
 volumes:
   litellm_postgres_data:
+  control_api_data:
