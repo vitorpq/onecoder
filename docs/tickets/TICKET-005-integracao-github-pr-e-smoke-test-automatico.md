@@ -1,7 +1,7 @@
 # TICKET-005 — Integração com Pull Request no GitHub e Smoke Test Pós-Deploy
 
 - **Prioridade:** Baixa (DX)
-- **Status:** Aberto
+- **Status:** Concluido
 
 ## Contexto e Problema
 Ao rodar `subir_branch_dominio_teste`, a URL `https://<branch>-<app>.teste.vitor.one` é retornada apenas no chat/terminal de quem disparou o deploy. O revisor do Pull Request no GitHub e o cliente não recebem o link automaticamente, e não há validação automática de que o container respondeu HTTP 200 após subir.

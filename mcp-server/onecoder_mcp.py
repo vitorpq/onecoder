@@ -274,15 +274,100 @@ def tool_subir_branch_dominio_teste(args: Dict[str, Any]) -> Dict[str, Any]:
         {"branch": branch, "host": host, "applicationId": new_app_id},
     )
 
+    preview_url = f"https://{host}"
+    smoke_test = run_preview_smoke_test(preview_url)
+    github_pr = post_github_pr_comment(branch, preview_url, smoke_test)
+
     return {
         "status": "ambiente_de_teste_iniciado",
         "branch": branch,
-        "url_teste": f"https://{host}",
+        "url_teste": preview_url,
         "applicationId": new_app_id,
         "domain": domain_resp,
         "deploy": deploy_resp,
+        "smoke_test": smoke_test,
+        "github_pr": github_pr,
         "observacao": "Valide a branch nesta URL antes de abrir Pull Request para a main.",
     }
+
+
+def run_preview_smoke_test(url: str, timeout_s: int = 10) -> Dict[str, Any]:
+    """Executa um smoke test HTTP GET na URL de preview gerada."""
+    import time
+
+    start = time.monotonic()
+    req = urllib.request.Request(url, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            latency_ms = round((time.monotonic() - start) * 1000, 1)
+            return {
+                "status": "ok" if 200 <= resp.status < 400 else "falha",
+                "http_status": resp.status,
+                "latency_ms": latency_ms,
+            }
+    except urllib.error.HTTPError as exc:
+        latency_ms = round((time.monotonic() - start) * 1000, 1)
+        return {
+            "status": "falha",
+            "http_status": exc.code,
+            "latency_ms": latency_ms,
+            "error": str(exc),
+        }
+    except Exception as exc:
+        latency_ms = round((time.monotonic() - start) * 1000, 1)
+        return {
+            "status": "falha",
+            "http_status": None,
+            "latency_ms": latency_ms,
+            "error": str(exc),
+        }
+
+
+def post_github_pr_comment(
+    branch: str, preview_url: str, smoke_result: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Publica comentario com a URL de preview no PR aberto no GitHub, se configurado."""
+    token = os.environ.get("GITHUB_TOKEN", "").strip()
+    repo = os.environ.get("GITHUB_REPOSITORY", "").strip()
+    if not token or not repo:
+        return {"status": "skipped", "reason": "GITHUB_TOKEN ou GITHUB_REPOSITORY nao configurado."}
+
+    owner = repo.split("/")[0]
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "Content-Type": "application/json",
+    }
+    pulls_url = (
+        f"https://api.github.com/repos/{repo}/pulls?"
+        + urllib.parse.urlencode({"head": f"{owner}:{branch}", "state": "open"})
+    )
+    try:
+        req = urllib.request.Request(pulls_url, headers=headers, method="GET")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            pulls = json.loads(resp.read().decode("utf-8"))
+        if not isinstance(pulls, list) or not pulls:
+            return {"status": "skipped", "reason": f"Nenhum PR aberto para branch '{branch}'."}
+
+        pr_number = pulls[0]["number"]
+        body_text = (
+            f"### Ambiente de Preview (onecoder)\n"
+            f"- **URL:** {preview_url}\n"
+            f"- **Smoke Test:** `{smoke_result.get('status')}` "
+            f"(HTTP {smoke_result.get('http_status')}, {smoke_result.get('latency_ms')} ms)\n"
+        )
+        comment_url = f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments"
+        comment_req = urllib.request.Request(
+            comment_url,
+            data=json.dumps({"body": body_text}).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        with urllib.request.urlopen(comment_req, timeout=10) as cresp:
+            cdata = json.loads(cresp.read().decode("utf-8"))
+        return {"status": "commented", "pr_number": pr_number, "comment_url": cdata.get("html_url")}
+    except Exception as exc:
+        return {"status": "error", "error": str(exc)}
 
 
 def tool_remover_ambiente_teste(args: Dict[str, Any]) -> Dict[str, Any]:
