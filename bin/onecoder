@@ -1,0 +1,672 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# CLI do desenvolvedor para codar com a IA central (Gemma 4 + MCP) e fazer deploy sem SSH via Dokploy.
+
+resolve_script_dir() {
+  local src="${BASH_SOURCE[0]}"
+  while [[ -L "${src}" ]]; do
+    local dir
+    dir="$(cd -P "$(dirname "${src}")" && pwd)"
+    src="$(readlink "${src}")"
+    [[ "${src}" != /* ]] && src="${dir}/${src}"
+  done
+  cd -P "$(dirname "${src}")" && pwd
+}
+
+SCRIPT_DIR="$(resolve_script_dir)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+MCP_SCRIPT="${REPO_ROOT}/mcp-server/onecoder_mcp.py"
+ONECODER_BIN="${SCRIPT_DIR}/onecoder"
+
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/onecoder"
+CONFIG_FILE="${CONFIG_DIR}/config.env"
+
+usage() {
+  cat <<'EOF'
+onecoder - Plataforma Central de IA Operacional (Gemma 4 + MCP) & Deploy Zero-SSH
+
+Uso:
+  onecoder login [opcoes]       Configura credenciais, OpenCode, Aider e MCP do VS Code
+  onecoder code [modelo]        Inicia sessao de codigo no terminal (padrao: gemma-4-31b)
+  onecoder mcp                  Inicia o Servidor MCP da empresa via stdio (usado pelo VS Code/OpenCode)
+  onecoder setup-vscode         Gera .vscode/mcp.json e .vscode/settings.json no projeto atual
+  onecoder init                 Vincula o repositorio atual a um projeto/VPS no Dokploy (.onecoder.json)
+  onecoder projects             Lista projetos, aplicacoes e composes disponiveis no Dokploy
+  onecoder deploy [opcoes]      Dispara deploy (branch de teste para devs; producao para admins)
+  onecoder doctor               Testa conexao com o LiteLLM (IA), Dokploy e Servidor MCP
+  onecoder --help               Exibe esta ajuda
+
+Opcoes do 'login':
+  --ai-url <url>              URL base do LiteLLM Proxy (ex: https://ia.vitor.one)
+  --ai-key <key>              Sua Virtual Key individual do LiteLLM
+  --dokploy-url <url>         URL do painel Dokploy (ex: https://deploy.vitor.one)
+  --dokploy-key <key>         API Key do Dokploy (x-api-key)
+  --model <modelo>            Modelo padrao (padrao: gemma-4-31b)
+  --role <dev|admin>          Perfil de permissao (padrao: dev)
+  --preview-domain <dominio>  Dominio coringa de testes (padrao: teste.vitor.one)
+
+Opcoes do 'code':
+  --agent <aider|opencode>    Escolhe o agente de terminal (detecta automaticamente se omitido)
+
+Opcoes do 'deploy':
+  --preview [branch]          Sobe a branch (ou branch Git atual) em dominio de teste
+  --type <application|compose> Sobrescreve o tipo definido em .onecoder.json
+  --id <service-id>           Sobrescreve o ID definido em .onecoder.json
+EOF
+}
+
+require_cmd() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "Erro: comando '$1' nao encontrado no sistema." >&2
+    exit 1
+  fi
+}
+
+load_config() {
+  if [[ ! -f "${CONFIG_FILE}" ]]; then
+    echo "Erro: configuracao nao encontrada em ${CONFIG_FILE}." >&2
+    echo "Execute 'onecoder login' primeiro." >&2
+    exit 1
+  fi
+  set -a
+  # shellcheck disable=SC1090
+  source "${CONFIG_FILE}"
+  set +a
+}
+
+strip_trailing_slash() {
+  printf '%s' "${1%/}"
+}
+
+write_vscode_mcp_json() {
+  local target_file="$1"
+  mkdir -p "$(dirname "${target_file}")"
+
+  python3 - "${target_file}" "${ONECODER_BIN}" <<'PY'
+import json
+import os
+import sys
+
+path, onecoder_bin = sys.argv[1:3]
+data = {}
+if os.path.exists(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            loaded = json.load(f)
+            if isinstance(loaded, dict):
+                data = loaded
+    except Exception:
+        data = {}
+
+servers = data.setdefault("servers", {})
+servers["onecoder-empresa"] = {
+    "type": "stdio",
+    "command": onecoder_bin,
+    "args": ["mcp"],
+}
+
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2, ensure_ascii=False)
+    f.write("\n")
+PY
+}
+
+configure_agents() {
+  local ai_url="$1"
+  local ai_key="$2"
+  local default_model="$3"
+  local ai_base="${ai_url}/v1"
+
+  # 1. Configura ~/.aider.conf.yml
+  cat > "${HOME}/.aider.conf.yml" <<EOF
+# Gerenciado por onecoder login
+openai-api-base: ${ai_base}
+openai-api-key: ${ai_key}
+model: openai/${default_model}
+weak-model: openai/gemma-4-26b
+EOF
+  chmod 600 "${HOME}/.aider.conf.yml"
+
+  # 2. Configura ~/.config/opencode/opencode.json (Provider Gemma 4 + MCP da empresa)
+  local opencode_dir="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
+  local opencode_file="${opencode_dir}/opencode.json"
+  mkdir -p "${opencode_dir}"
+
+  python3 - "${opencode_file}" "${ai_base}" "${ai_key}" "${default_model}" "${ONECODER_BIN}" <<'PY'
+import json
+import os
+import sys
+
+path, base_url, api_key, default_model, onecoder_bin = sys.argv[1:6]
+data = {}
+if os.path.exists(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            loaded = json.load(f)
+            if isinstance(loaded, dict):
+                data = loaded
+    except Exception:
+        data = {}
+
+providers = data.setdefault("provider", {})
+providers["onecoder"] = {
+    "npm": "@ai-sdk/openai-compatible",
+    "name": "Empresa IA (Gemma 4)",
+    "options": {
+        "baseURL": base_url,
+        "apiKey": api_key,
+    },
+    "models": {
+        "gemma-4-31b": {"name": "Gemma 4 31B"},
+        "gemma-4-26b": {"name": "Gemma 4 26B MoE"},
+        "gemma-4-free": {"name": "Gemma 4 31B (Free)"},
+        "gemma-4-studio": {"name": "Gemma 4 31B (AI Studio)"},
+    },
+}
+data["model"] = f"onecoder/{default_model}"
+
+mcp = data.setdefault("mcp", {})
+mcp["onecoder-empresa"] = {
+    "type": "local",
+    "command": [onecoder_bin, "mcp"],
+    "enabled": True,
+}
+
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2, ensure_ascii=False)
+    f.write("\n")
+PY
+  chmod 600 "${opencode_file}"
+
+  # 3. Configura template MCP do VS Code em ~/.config/onecoder/vscode-mcp.json
+  write_vscode_mcp_json "${CONFIG_DIR}/vscode-mcp.json"
+  if [[ -d ".vscode" ]]; then
+    write_vscode_mcp_json ".vscode/mcp.json"
+  fi
+}
+
+cmd_login() {
+  require_cmd python3
+
+  local ai_url=""
+  local ai_key=""
+  local dokploy_url=""
+  local dokploy_key=""
+  local default_model="gemma-4-31b"
+  local role="dev"
+  local preview_domain="teste.vitor.one"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --ai-url)
+        ai_url="${2:-}"
+        shift 2
+        ;;
+      --ai-key)
+        ai_key="${2:-}"
+        shift 2
+        ;;
+      --dokploy-url)
+        dokploy_url="${2:-}"
+        shift 2
+        ;;
+      --dokploy-key)
+        dokploy_key="${2:-}"
+        shift 2
+        ;;
+      --model)
+        default_model="${2:-}"
+        shift 2
+        ;;
+      --role)
+        role="${2:-}"
+        shift 2
+        ;;
+      --preview-domain)
+        preview_domain="${2:-}"
+        shift 2
+        ;;
+      *)
+        echo "Erro: opcao desconhecida '$1' em 'onecoder login'." >&2
+        exit 1
+        ;;
+    esac
+  done
+
+  if [[ "${role}" != "dev" && "${role}" != "admin" ]]; then
+    echo "Erro: --role deve ser 'dev' ou 'admin'." >&2
+    exit 1
+  fi
+
+  if [[ -z "${ai_url}" ]]; then
+    read -r -p "URL do Gateway de IA (ex: https://ia.vitor.one): " ai_url
+  fi
+  if [[ -z "${ai_key}" ]]; then
+    read -r -s -p "Sua Virtual Key de IA (sk-...): " ai_key
+    echo ""
+  fi
+  if [[ -z "${dokploy_url}" ]]; then
+    read -r -p "URL do Dokploy (ex: https://deploy.vitor.one): " dokploy_url
+  fi
+  if [[ -z "${dokploy_key}" ]]; then
+    read -r -s -p "API Key do Dokploy (x-api-key): " dokploy_key
+    echo ""
+  fi
+
+  ai_url="$(strip_trailing_slash "${ai_url}")"
+  dokploy_url="$(strip_trailing_slash "${dokploy_url}")"
+
+  if [[ -z "${ai_url}" || -z "${ai_key}" ]]; then
+    echo "Erro: --ai-url e --ai-key sao obrigatorios." >&2
+    exit 1
+  fi
+
+  mkdir -p "${CONFIG_DIR}"
+  cat > "${CONFIG_FILE}" <<EOF
+ONECODER_AI_URL='${ai_url}'
+ONECODER_AI_KEY='${ai_key}'
+ONECODER_DOKPLOY_URL='${dokploy_url}'
+ONECODER_DOKPLOY_KEY='${dokploy_key}'
+ONECODER_DEFAULT_MODEL='${default_model}'
+ONECODER_ROLE='${role}'
+ONECODER_PREVIEW_DOMAIN='${preview_domain}'
+EOF
+  chmod 600 "${CONFIG_FILE}"
+
+  configure_agents "${ai_url}" "${ai_key}" "${default_model}"
+
+  echo "Login salvo em ${CONFIG_FILE} (perfil: ${role})."
+  echo "Integracoes configuradas:"
+  echo "  - OpenCode (IA + MCP): ${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json"
+  echo "  - Aider:               ~/.aider.conf.yml"
+  echo "  - VS Code MCP base:    ${CONFIG_DIR}/vscode-mcp.json"
+  echo ""
+  echo "Dica: rode 'onecoder setup-vscode' dentro de qualquer projeto para ativar o MCP no VS Code."
+  echo "Execute 'onecoder doctor' para validar todas as conexoes."
+}
+
+cmd_mcp() {
+  require_cmd python3
+  if [[ -f "${CONFIG_FILE}" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "${CONFIG_FILE}"
+    set +a
+  fi
+  exec python3 "${MCP_SCRIPT}"
+}
+
+cmd_setup_vscode() {
+  load_config
+  require_cmd python3
+
+  mkdir -p .vscode
+  write_vscode_mcp_json ".vscode/mcp.json"
+
+  python3 - "${ONECODER_AI_URL}" "${ONECODER_DEFAULT_MODEL:-gemma-4-31b}" <<'PY'
+import json
+import os
+import sys
+
+ai_url, model = sys.argv[1:3]
+path = ".vscode/settings.json"
+data = {}
+if os.path.exists(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            loaded = json.load(f)
+            if isinstance(loaded, dict):
+                data = loaded
+    except Exception:
+        data = {}
+
+data["onecoder.aiBaseUrl"] = f"{ai_url}/v1"
+data["onecoder.defaultModel"] = model
+
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2, ensure_ascii=False)
+    f.write("\n")
+PY
+
+  echo "VS Code configurado neste repositorio:"
+  echo "  - .vscode/mcp.json (servidor MCP 'onecoder-empresa')"
+  echo "  - .vscode/settings.json (Gateway IA: ${ONECODER_AI_URL}/v1)"
+}
+
+cmd_code() {
+  load_config
+
+  local agent=""
+  local model=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --agent)
+        agent="${2:-}"
+        shift 2
+        ;;
+      -*)
+        echo "Erro: opcao desconhecida '$1' em 'onecoder code'." >&2
+        exit 1
+        ;;
+      *)
+        model="$1"
+        shift
+        ;;
+    esac
+  done
+
+  model="${model:-${ONECODER_DEFAULT_MODEL:-gemma-4-31b}}"
+  export OPENAI_API_BASE="${ONECODER_AI_URL}/v1"
+  export OPENAI_API_KEY="${ONECODER_AI_KEY}"
+
+  if [[ -z "${agent}" ]]; then
+    if command -v opencode >/dev/null 2>&1; then
+      agent="opencode"
+    elif command -v aider >/dev/null 2>&1; then
+      agent="aider"
+    fi
+  fi
+
+  case "${agent}" in
+    opencode)
+      require_cmd opencode
+      exec opencode
+      ;;
+    aider)
+      require_cmd aider
+      exec aider --model "openai/${model}"
+      ;;
+    *)
+      echo "Nenhum agente de terminal encontrado (opencode ou aider)." >&2
+      echo "Instale um deles para programar com o Gemma 4 + MCP da empresa:" >&2
+      echo "  - OpenCode (recomendado, com MCP): npm install -g opencode-ai" >&2
+      echo "  - Aider (via uv):                  uv tool install aider-chat" >&2
+      exit 1
+      ;;
+  esac
+}
+
+cmd_init() {
+  require_cmd python3
+
+  local client_name=""
+  local service_type=""
+  local service_id=""
+
+  read -r -p "Nome do cliente (ex: acme): " client_name
+  read -r -p "Tipo no Dokploy [application/compose] (padrao: application): " service_type
+  service_type="${service_type:-application}"
+
+  if [[ "${service_type}" != "application" && "${service_type}" != "compose" ]]; then
+    echo "Erro: tipo deve ser 'application' ou 'compose'." >&2
+    exit 1
+  fi
+
+  read -r -p "ID do servico no Dokploy (use 'onecoder projects' para consultar): " service_id
+  if [[ -z "${service_id}" ]]; then
+    echo "Erro: ID do servico nao pode ser vazio." >&2
+    exit 1
+  fi
+
+  python3 - "${client_name}" "${service_type}" "${service_id}" <<'PY'
+import json
+import sys
+
+client_name, service_type, service_id = sys.argv[1:4]
+payload = {
+    "client": client_name,
+    "type": service_type,
+    "id": service_id,
+}
+with open(".onecoder.json", "w", encoding="utf-8") as f:
+    json.dump(payload, f, indent=2, ensure_ascii=False)
+    f.write("\n")
+PY
+
+  echo "Arquivo .onecoder.json criado! Agora voce pode rodar 'onecoder deploy --preview' ou 'onecoder deploy'."
+}
+
+cmd_projects() {
+  load_config
+  require_cmd curl
+  require_cmd python3
+
+  if [[ -z "${ONECODER_DOKPLOY_URL:-}" || -z "${ONECODER_DOKPLOY_KEY:-}" ]]; then
+    echo "Erro: Dokploy nao configurado. Rode 'onecoder login' informando --dokploy-url e --dokploy-key." >&2
+    exit 1
+  fi
+
+  local response
+  response="$(curl -fsS -H "accept: application/json" -H "x-api-key: ${ONECODER_DOKPLOY_KEY}" "${ONECODER_DOKPLOY_URL}/api/project.all")"
+
+  python3 - "${response}" <<'PY'
+import json
+import sys
+
+projects = json.loads(sys.argv[1])
+if not isinstance(projects, list) or not projects:
+    print("Nenhum projeto encontrado no Dokploy.")
+    sys.exit(0)
+
+for project in projects:
+    pname = project.get("name", "(sem nome)")
+    print(f"Projeto: {pname}")
+    envs = project.get("environments") or []
+    containers = envs if envs else [project]
+    for env in containers:
+        env_name = env.get("name", "default")
+        env_id = env.get("environmentId", "-")
+        print(f"  Ambiente: {env_name} (environmentId={env_id})")
+        for app in env.get("applications") or []:
+            print(f"    [application] {app.get('name')} | id={app.get('applicationId')}")
+        for comp in env.get("compose") or []:
+            print(f"    [compose]     {comp.get('name')} | id={comp.get('composeId')}")
+PY
+}
+
+cmd_deploy() {
+  load_config
+  require_cmd curl
+  require_cmd python3
+
+  if [[ -z "${ONECODER_DOKPLOY_URL:-}" || -z "${ONECODER_DOKPLOY_KEY:-}" ]]; then
+    echo "Erro: Dokploy nao configurado. Rode 'onecoder login' informando --dokploy-url e --dokploy-key." >&2
+    exit 1
+  fi
+
+  local service_type=""
+  local service_id=""
+  local client_name=""
+  local preview_mode=false
+  local preview_branch=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --type)
+        service_type="${2:-}"
+        shift 2
+        ;;
+      --id)
+        service_id="${2:-}"
+        shift 2
+        ;;
+      --preview)
+        preview_mode=true
+        if [[ -n "${2:-}" && "${2:-}" != -* ]]; then
+          preview_branch="$2"
+          shift 2
+        else
+          shift 1
+        fi
+        ;;
+      *)
+        echo "Erro: opcao desconhecida '$1' em 'onecoder deploy'." >&2
+        exit 1
+        ;;
+    esac
+  done
+
+  if [[ "${preview_mode}" == "true" ]]; then
+    if [[ -z "${preview_branch}" ]]; then
+      preview_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+    fi
+    if [[ -z "${preview_branch}" || "${preview_branch}" == "HEAD" ]]; then
+      echo "Erro: informe o nome da branch (ex: onecoder deploy --preview fix/meu-ajuste)." >&2
+      exit 1
+    fi
+
+    local env_id=""
+    local app_name=""
+    read -r -p "environmentId no Dokploy (veja com 'onecoder projects'): " env_id
+    read -r -p "Nome curto do sistema (ex: api-acme): " app_name
+
+    python3 - "${MCP_SCRIPT}" "${env_id}" "${app_name}" "${preview_branch}" <<'PY'
+import importlib.util
+import json
+import sys
+
+mcp_path, env_id, app_name, branch = sys.argv[1:5]
+spec = importlib.util.spec_from_file_location("onecoder_mcp", mcp_path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+res = mod.tool_subir_branch_dominio_teste({
+    "environmentId": env_id,
+    "appName": app_name,
+    "branch": branch,
+})
+print(json.dumps(res, indent=2, ensure_ascii=False))
+PY
+    return 0
+  fi
+
+  local role="${ONECODER_ROLE:-dev}"
+  if [[ "${role}" != "admin" ]]; then
+    echo "Bloqueado pelo perfil '${role}': deploy direto em producao exige perfil 'admin' ou merge aprovado na main." >&2
+    echo "Use 'onecoder deploy --preview <branch>' (ou peca no chat do VS Code/OpenCode) para publicar em dominio de teste." >&2
+    exit 1
+  fi
+
+  if [[ -z "${service_type}" || -z "${service_id}" ]]; then
+    if [[ ! -f ".onecoder.json" ]]; then
+      echo "Erro: .onecoder.json nao encontrado neste diretorio. Rode 'onecoder init' ou passe --type e --id." >&2
+      exit 1
+    fi
+    IFS=$'\t' read -r client_name service_type service_id < <(python3 - <<'PY'
+import json
+with open(".onecoder.json", "r", encoding="utf-8") as f:
+    cfg = json.load(f)
+print(f"{cfg.get('client', '')}\t{cfg.get('type', '')}\t{cfg.get('id', '')}")
+PY
+)
+  fi
+
+  if [[ -z "${service_id}" ]]; then
+    echo "Erro: ID do servico invalido ou ausente." >&2
+    exit 1
+  fi
+
+  local endpoint=""
+  local body=""
+  case "${service_type}" in
+    application)
+      endpoint="${ONECODER_DOKPLOY_URL}/api/application.deploy"
+      body="$(python3 -c 'import json,sys; print(json.dumps({"applicationId": sys.argv[1]}))' "${service_id}")"
+      ;;
+    compose)
+      endpoint="${ONECODER_DOKPLOY_URL}/api/compose.deploy"
+      body="$(python3 -c 'import json,sys; print(json.dumps({"composeId": sys.argv[1]}))' "${service_id}")"
+      ;;
+    *)
+      echo "Erro: tipo '${service_type}' invalido. Use 'application' ou 'compose'." >&2
+      exit 1
+      ;;
+  esac
+
+  echo "Disparando deploy de producao (${service_type}: ${service_id}${client_name:+, cliente: ${client_name}})..."
+  curl -fsS -X POST "${endpoint}" \
+    -H "accept: application/json" \
+    -H "Content-Type: application/json" \
+    -H "x-api-key: ${ONECODER_DOKPLOY_KEY}" \
+    -d "${body}" >/dev/null
+
+  echo "Deploy iniciado com sucesso na VPS do cliente via Dokploy!"
+}
+
+cmd_doctor() {
+  load_config
+  require_cmd curl
+  require_cmd python3
+
+  echo "==> Testando Servidor MCP (${MCP_SCRIPT})..."
+  python3 "${MCP_SCRIPT}" --self-test
+
+  echo "==> Testando Gateway de IA (${ONECODER_AI_URL})..."
+  if curl -fsS -H "Authorization: Bearer ${ONECODER_AI_KEY}" "${ONECODER_AI_URL}/v1/models" >/dev/null; then
+    echo "  [OK] LiteLLM respondeu com sucesso."
+  else
+    echo "  [FALHA] Nao foi possivel autenticar ou alcancar ${ONECODER_AI_URL}/v1/models." >&2
+    exit 1
+  fi
+
+  if [[ -n "${ONECODER_DOKPLOY_URL:-}" && -n "${ONECODER_DOKPLOY_KEY:-}" ]]; then
+    echo "==> Testando Dokploy (${ONECODER_DOKPLOY_URL})..."
+    if curl -fsS -H "accept: application/json" -H "x-api-key: ${ONECODER_DOKPLOY_KEY}" "${ONECODER_DOKPLOY_URL}/api/project.all" >/dev/null; then
+      echo "  [OK] API do Dokploy respondeu com sucesso (perfil: ${ONECODER_ROLE:-dev})."
+    else
+      echo "  [FALHA] Nao foi possivel autenticar ou alcancar ${ONECODER_DOKPLOY_URL}/api/project.all." >&2
+      exit 1
+    fi
+  else
+    echo "==> Dokploy nao configurado (opcional se voce usa apenas a IA)."
+  fi
+}
+
+main() {
+  if [[ $# -eq 0 ]]; then
+    usage
+    exit 0
+  fi
+
+  local subcommand="$1"
+  shift
+
+  case "${subcommand}" in
+    login)
+      cmd_login "$@"
+      ;;
+    code)
+      cmd_code "$@"
+      ;;
+    mcp)
+      cmd_mcp "$@"
+      ;;
+    setup-vscode)
+      cmd_setup_vscode "$@"
+      ;;
+    init)
+      cmd_init "$@"
+      ;;
+    projects)
+      cmd_projects "$@"
+      ;;
+    deploy)
+      cmd_deploy "$@"
+      ;;
+    doctor)
+      cmd_doctor "$@"
+      ;;
+    -h|--help|help)
+      usage
+      ;;
+    *)
+      echo "Erro: subcomando desconhecido '${subcommand}'." >&2
+      usage
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"

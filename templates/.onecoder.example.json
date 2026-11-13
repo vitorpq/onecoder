@@ -1,0 +1,5 @@
+{
+  "client": "nome-do-cliente",
+  "type": "application",
+  "id": "cole-aqui-o-applicationId-ou-composeId-do-dokploy"
+}

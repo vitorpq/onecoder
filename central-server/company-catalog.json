@@ -1,0 +1,30 @@
+{
+  "company": "Sua Empresa de TI",
+  "engineering_rules": {
+    "deploy_flow": "Devs criam branches e validam em dominios de teste (*.teste.vitor.one). Producao (main) so atualiza apos merge aprovado ou acao de um Admin.",
+    "ssh_policy": "Proibido distribuir chaves SSH das VPS de clientes para devs. Toda inspecao e deploy acontecem via Dokploy + Tailscale.",
+    "preview_domain": "teste.vitor.one"
+  },
+  "stack_standards": {
+    "runtime": "Docker + Docker Compose",
+    "reverse_proxy": "Traefik com HTTPS automatico (Let's Encrypt)",
+    "default_port": 3000,
+    "required_files": ["Dockerfile ou docker-compose.yml", ".env.example"]
+  },
+  "clients": [
+    {
+      "name": "cliente-exemplo",
+      "vps_hostname": "cliente-exemplo-prod",
+      "tailscale_ip": "100.x.x.x",
+      "systems": [
+        {
+          "name": "api-principal",
+          "stack": "Node.js / Postgres",
+          "prod_domain": "api.cliente-exemplo.com.br",
+          "preview_domain": "api-cliente-exemplo.teste.vitor.one",
+          "dokploy_application_id": "preencher-ou-consultar-via-api"
+        }
+      ]
+    }
+  ]
+}
