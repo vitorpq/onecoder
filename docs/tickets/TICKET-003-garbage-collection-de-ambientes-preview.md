@@ -1,7 +1,7 @@
 # TICKET-003 — Garbage Collection de Ambientes Preview
 
 - **Prioridade:** Média (Custo/Operação)
-- **Status:** Aberto
+- **Status:** Concluido
 
 ## Contexto e Problema
 A ferramenta `subir_branch_dominio_teste` e o comando `onecoder deploy --preview` criam uma aplicação dedicada e um domínio `*.teste.vitor.one` no Dokploy para cada branch testada. Sem limpeza automática, containers antigos de branches já mergeadas ou abandonadas continuam consumindo RAM, CPU e disco no servidor de homologação.

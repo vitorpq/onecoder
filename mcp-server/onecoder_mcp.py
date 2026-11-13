@@ -262,6 +262,21 @@ def tool_subir_branch_dominio_teste(args: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def tool_remover_ambiente_teste(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Remove um ambiente de teste (preview) apos o encerramento da validacao."""
+    app_id = (args.get("applicationId") or "").strip()
+    if not app_id:
+        raise ValueError("Parametro obrigatorio 'applicationId' nao informado.")
+
+    resp = dokploy_request("POST", "/api/application.delete", {"applicationId": app_id})
+    append_audit_log("remover_ambiente_teste", {"applicationId": app_id})
+    return {
+        "status": "ambiente_de_teste_removido",
+        "applicationId": app_id,
+        "dokploy": resp,
+    }
+
+
 def tool_criar_novo_sistema(args: Dict[str, Any]) -> Dict[str, Any]:
     """Cria um novo projeto + aplicacao + dominio inicial de homologacao no Dokploy."""
     project_name = (args.get("projectName") or "").strip()
@@ -468,6 +483,22 @@ TOOLS: List[Dict[str, Any]] = [
         "handler": tool_subir_branch_dominio_teste,
     },
     {
+        "name": "remover_ambiente_teste",
+        "description": "Remove um ambiente de teste (preview) no Dokploy apos concluir a validacao da branch.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "applicationId": {
+                    "type": "string",
+                    "description": "ID da aplicacao de preview no Dokploy (applicationId).",
+                }
+            },
+            "required": ["applicationId"],
+            "additionalProperties": False,
+        },
+        "handler": tool_remover_ambiente_teste,
+    },
+    {
         "name": "criar_novo_sistema",
         "description": (
             "Cria um novo projeto e aplicacao no Dokploy ja vinculados a um dominio inicial de "
@@ -602,7 +633,7 @@ def run_self_test() -> int:
     list_resp = handle_message({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
     tools = list_resp["result"]["tools"] if list_resp else []
     names = [t["name"] for t in tools]
-    assert len(names) == 6, f"Esperado 6 ferramentas, encontrado {len(names)}: {names}"
+    assert len(names) == 7, f"Esperado 7 ferramentas, encontrado {len(names)}: {names}"
 
     os.environ["ONECODER_ROLE"] = "dev"
     guard_resp = handle_message(
