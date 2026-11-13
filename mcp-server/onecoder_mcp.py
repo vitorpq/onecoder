@@ -106,6 +106,29 @@ def append_audit_log(action: str, details: Dict[str, Any]) -> None:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
+_CATALOG_CACHE: Dict[str, Any] = {"path": "", "expires_at": 0.0, "data": None}
+_CATALOG_CACHE_TTL_SECONDS = 60.0
+
+
+def _read_catalog_cached(catalog_file: Path) -> Any:
+    import time
+
+    now = time.monotonic()
+    key = str(catalog_file)
+    if (
+        _CATALOG_CACHE["path"] == key
+        and _CATALOG_CACHE["data"] is not None
+        and now < _CATALOG_CACHE["expires_at"]
+    ):
+        return _CATALOG_CACHE["data"]
+
+    data = json.loads(catalog_file.read_text(encoding="utf-8"))
+    _CATALOG_CACHE["path"] = key
+    _CATALOG_CACHE["data"] = data
+    _CATALOG_CACHE["expires_at"] = now + _CATALOG_CACHE_TTL_SECONDS
+    return data
+
+
 def tool_consultar_catalogo_empresa(_args: Dict[str, Any]) -> Dict[str, Any]:
     """Retorna o catalogo estatico da empresa combinado com projetos e VPSs do Dokploy."""
     cfg = env_config()
@@ -119,11 +142,11 @@ def tool_consultar_catalogo_empresa(_args: Dict[str, Any]) -> Dict[str, Any]:
 
     catalog_file = Path(cfg["catalog_path"])
     if catalog_file.exists():
-        result["catalogo_empresa"] = json.loads(catalog_file.read_text(encoding="utf-8"))
+        result["catalogo_empresa"] = _read_catalog_cached(catalog_file)
     else:
         result["catalogo_empresa"] = {"aviso": f"Arquivo {catalog_file} nao encontrado."}
 
-    if cfg["dokploy_url"] and cfg["dokploy_key"]:
+    if cfg["control_url"] and (cfg["ai_key"] or cfg["dokploy_key"]):
         try:
             result["dokploy_projetos"] = dokploy_request("GET", "/api/project.all")
         except Exception as exc:

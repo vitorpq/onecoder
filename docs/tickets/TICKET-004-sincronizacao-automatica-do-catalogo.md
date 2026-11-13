@@ -1,7 +1,7 @@
 # TICKET-004 — Sincronização Automática do Catálogo da Empresa
 
 - **Prioridade:** Média (Experiência do Dev)
-- **Status:** Aberto
+- **Status:** Concluido
 
 ## Contexto e Problema
 Hoje o arquivo [central-server/company-catalog.json](../../central-server/company-catalog.json) exige manutenção manual para manter nomes de clientes, IPs Tailscale, stacks e `dokploy_application_id` atualizados. Quando novos clientes entram, o catálogo estático pode ficar defasado em relação ao Dokploy.
