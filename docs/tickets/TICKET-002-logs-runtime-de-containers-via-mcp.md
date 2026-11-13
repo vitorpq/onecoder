@@ -1,7 +1,7 @@
 # TICKET-002 — Leitura de Logs Runtime de Containers via MCP
 
 - **Prioridade:** Alta (Diagnóstico)
-- **Status:** Aberto
+- **Status:** Concluido
 
 ## Contexto e Problema
 Atualmente a ferramenta `diagnosticar_sistema_cliente` em [mcp-server/onecoder_mcp.py](../../mcp-server/onecoder_mcp.py) consulta `/api/application.one`, `/api/deployment.all` e `/api/previewDeployment.all`. Isso retorna o status e o histórico de builds/deploys, mas não traz os logs de execução (`stdout`/`stderr`) do container em tempo real (ex: um erro 500 de banco de dados ou exceção de runtime após o deploy já ter sido concluído).

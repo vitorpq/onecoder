@@ -161,6 +161,52 @@ def tool_diagnosticar_sistema_cliente(args: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def redact_sensitive_logs(text: str) -> str:
+    """Mascara credenciais comuns (PASSWORD, SECRET, TOKEN, Bearer) antes de enviar ao modelo."""
+    redacted = re.sub(
+        r"(?i)\b(PASSWORD|SECRET|TOKEN|API_KEY|PRIVATE_KEY)\s*([=:])\s*\S+",
+        r"\1\2***REDACTED***",
+        text,
+    )
+    redacted = re.sub(r"(?i)(Bearer\s+)[A-Za-z0-9._\-]+", r"\1***REDACTED***", redacted)
+    return redacted
+
+
+def tool_ler_logs_container_tempo_real(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Le os logs de runtime (stdout/stderr) de um container via Dokploy/Control API."""
+    app_id = (args.get("applicationId") or "").strip()
+    if not app_id:
+        raise ValueError("Parametro obrigatorio 'applicationId' nao informado.")
+
+    tail_lines = int(args.get("tailLines") or 100)
+    tail_lines = max(1, min(500, tail_lines))
+    search = (args.get("search") or "").strip()
+
+    query = urllib.parse.urlencode({"applicationId": app_id, "tail": tail_lines})
+    raw_resp = dokploy_request("GET", f"/api/application.readLogs?{query}")
+
+    if isinstance(raw_resp, dict):
+        logs_text = str(raw_resp.get("logs") or raw_resp.get("data") or raw_resp)
+    elif isinstance(raw_resp, list):
+        logs_text = "\n".join(str(line) for line in raw_resp)
+    else:
+        logs_text = str(raw_resp)
+
+    lines = logs_text.splitlines()
+    if search:
+        search_lower = search.lower()
+        lines = [line for line in lines if search_lower in line.lower()]
+    lines = lines[-tail_lines:]
+
+    return {
+        "applicationId": app_id,
+        "tailLines": tail_lines,
+        "search": search or None,
+        "totalLines": len(lines),
+        "logs": redact_sensitive_logs("\n".join(lines)),
+    }
+
+
 def tool_subir_branch_dominio_teste(args: Dict[str, Any]) -> Dict[str, Any]:
     """Cria uma aplicacao de preview para uma branch e publica em dominio de teste."""
     env_id = (args.get("environmentId") or "").strip()
@@ -375,6 +421,33 @@ TOOLS: List[Dict[str, Any]] = [
         "handler": tool_diagnosticar_sistema_cliente,
     },
     {
+        "name": "ler_logs_container_tempo_real",
+        "description": (
+            "Le os logs de runtime (stdout/stderr) de um container no Dokploy com mascaramento "
+            "automatico de credenciais sensiveis."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "applicationId": {
+                    "type": "string",
+                    "description": "ID da aplicacao no Dokploy (applicationId).",
+                },
+                "tailLines": {
+                    "type": "integer",
+                    "description": "Quantidade de linhas finais a retornar (padrao 100, maximo 500).",
+                },
+                "search": {
+                    "type": "string",
+                    "description": "Filtro textual opcional para buscar termos especificos nos logs.",
+                },
+            },
+            "required": ["applicationId"],
+            "additionalProperties": False,
+        },
+        "handler": tool_ler_logs_container_tempo_real,
+    },
+    {
         "name": "subir_branch_dominio_teste",
         "description": (
             "Cria um ambiente isolado para uma branch e publica automaticamente em um subdominio "
@@ -529,7 +602,7 @@ def run_self_test() -> int:
     list_resp = handle_message({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
     tools = list_resp["result"]["tools"] if list_resp else []
     names = [t["name"] for t in tools]
-    assert len(names) == 5, f"Esperado 5 ferramentas, encontrado {len(names)}: {names}"
+    assert len(names) == 6, f"Esperado 6 ferramentas, encontrado {len(names)}: {names}"
 
     os.environ["ONECODER_ROLE"] = "dev"
     guard_resp = handle_message(
